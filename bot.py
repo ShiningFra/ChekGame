@@ -308,10 +308,11 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await query.answer(f"Tu as pioché : {v} {e} — non jouable, tour passé.", show_alert=True)
             game.next_turn()
             await query.edit_message_text(
-                _status_text(game) + f"\n\n📥 <b>{user.first_name}</b> pioche et passe son tour.",
-                reply_markup=_game_keyboard(chat_id, game),
+                f"📥 <b>{user.first_name}</b> pioche et passe son tour.",
+                reply_markup=None,
                 parse_mode=ParseMode.HTML,
             )
+            await _notify_next(ctx.bot, chat_id, game)
 
     elif data.startswith("pass_"):
         chat_id = int(data.removeprefix("pass_"))
@@ -323,10 +324,11 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         game.next_turn()
         await query.edit_message_text(
-            _status_text(game) + f"\n\n⏭️ <b>{user.first_name}</b> passe son tour.",
-            reply_markup=_game_keyboard(chat_id, game),
+            f"⏭️ <b>{user.first_name}</b> passe son tour.",
+            reply_markup=None,
             parse_mode=ParseMode.HTML,
         )
+        await _notify_next(ctx.bot, chat_id, game)
 
     elif data.startswith("suffer_"):
         chat_id = int(data.removeprefix("suffer_"))
@@ -338,10 +340,11 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         count = game.suffer_attack(user.id)
         await query.edit_message_text(
-            _status_text(game) + f"\n\n💀 <b>{user.first_name}</b> subit l'attaque et pioche <b>{count} cartes</b> !",
-            reply_markup=_game_keyboard(chat_id, game),
+            f"💀 <b>{user.first_name}</b> subit l'attaque et pioche <b>{count} carte(s)</b> !",
+            reply_markup=None,
             parse_mode=ParseMode.HTML,
         )
+        await _notify_next(ctx.bot, chat_id, game)
 
     elif data.startswith("suit_"):
         _, chat_id_s, suit = data.split("_", 2)
@@ -354,10 +357,12 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         game.set_top_suit(suit)
         await query.edit_message_text(
-            _status_text(game),
-            reply_markup=_game_keyboard(chat_id, game),
+            f"🎨 Couleur choisie par <b>{user.first_name}</b> : "
+            f"{'♠️ Pique' if suit=='spades' else '♥️ Cœur' if suit=='hearts' else '♦️ Carreau' if suit=='diamonds' else '♣️ Trèfle'}",
+            reply_markup=None,
             parse_mode=ParseMode.HTML,
         )
+        await _notify_next(ctx.bot, chat_id, game)
 
 
 # ══════════════════════════════════════════════════════════
@@ -497,6 +502,17 @@ async def _try_dm(bot, user_id: int, text: str) -> None:
 # ══════════════════════════════════════════════════════════
 # CHOSEN INLINE RESULT
 # ══════════════════════════════════════════════════════════
+
+async def _notify_next(bot, chat_id: int, game: Game) -> None:
+    """Envoie un message séparé qui tag le joueur suivant (génère une vraie notification)."""
+    nxt = game.current_player()
+    await bot.send_message(
+        chat_id,
+        f"👉 {nxt.mention()}, c'est ton tour !",
+        reply_markup=_game_keyboard(chat_id, game),
+        parse_mode=ParseMode.HTML,
+    )
+
 
 async def _send_game_state(bot, chat_id: int, game: Game, effect_msg: str = "") -> None:
     """Envoie le statut de jeu avec le bouton d'action."""
