@@ -68,15 +68,21 @@ def _image_url(card: Card) -> Optional[str]:
     return f"{IMAGES_BASE_URL.rstrip('/')}/{card_to_image_number(card)}.jpg"
 
 
+def _card_label(card: Card) -> str:
+    v = {"J": "J", "Q": "Q", "K": "K", "A": "A", "JOKER": "🃏"}.get(card.value, card.value)
+    return f"{v}{card.suit_emoji()}"
+
+
 def _status_text(game: Game) -> str:
     current = game.current_player()
     lines = [
         "🃏 <b>CheckGame en cours !</b>",
         "",
         f"🎴 Carte du dessus : <b>{game.top_card}</b>",
-        "",
-        "👥 <b>Joueurs :</b>",
     ]
+    if game.under_attack:
+        lines.append(f"⚔️ <b>Attaque en cours : {game.attack_stack} carte(s) à piocher !</b>")
+    lines += ["", "👥 <b>Joueurs :</b>"]
     for i, p in enumerate(game.players):
         arrow = "▶️" if i == game.turn_index else "　"
         check = " 🔔<i>CHECK!</i>" if len(p.hand) == 1 else ""
@@ -89,7 +95,19 @@ def _status_text(game: Game) -> str:
     return "\n".join(lines)
 
 
-def _game_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+def _game_keyboard(chat_id: int, game: Game) -> InlineKeyboardMarkup:
+    """Clavier normal ou clavier sous attaque selon l'état."""
+    if game.under_attack:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "🃏 Counter !",
+                switch_inline_query_current_chat=f"play_{chat_id}",
+            ),
+            InlineKeyboardButton(
+                f"💀 Subir ({game.attack_stack} cartes)",
+                callback_data=f"suffer_{chat_id}",
+            ),
+        ]])
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(
             "🃏 Jouer une carte",
@@ -100,7 +118,6 @@ def _game_keyboard(chat_id: int) -> InlineKeyboardMarkup:
 
 
 def _draw_or_pass_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    """Clavier après avoir pioché : jouer la carte piochée ou passer."""
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(
             "🃏 Jouer la carte piochée",
@@ -256,7 +273,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         game.start()
         await query.edit_message_text(
             _status_text(game),
-            reply_markup=_game_keyboard(chat_id),
+            reply_markup=_game_keyboard(chat_id, game),
             parse_mode=ParseMode.HTML,
         )
 
@@ -279,20 +296,20 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         e = card.suit_emoji()
 
         if game.can_play(card, user.id):
-            # La carte piochée est jouable : on propose de la jouer ou de passer
+            # Révèle la carte UNIQUEMENT au joueur via popup (visible que par lui)
             await query.answer(f"Tu as pioché : {v} {e} — elle est jouable !", show_alert=True)
             await query.edit_message_text(
-                _status_text(game) + f"\n\n📥 <b>{user.first_name}</b> pioche <b>{v} {e}</b> — jouable !",
+                _status_text(game) + f"\n\n📥 <b>{user.first_name}</b> pioche une carte — elle est jouable !",
                 reply_markup=_draw_or_pass_keyboard(chat_id),
                 parse_mode=ParseMode.HTML,
             )
         else:
-            # Pas jouable → passe le tour automatiquement
+            # Pas jouable → passe le tour, carte non révélée
             await query.answer(f"Tu as pioché : {v} {e} — non jouable, tour passé.", show_alert=True)
             game.next_turn()
             await query.edit_message_text(
                 _status_text(game) + f"\n\n📥 <b>{user.first_name}</b> pioche et passe son tour.",
-                reply_markup=_game_keyboard(chat_id),
+                reply_markup=_game_keyboard(chat_id, game),
                 parse_mode=ParseMode.HTML,
             )
 
@@ -307,7 +324,22 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         game.next_turn()
         await query.edit_message_text(
             _status_text(game) + f"\n\n⏭️ <b>{user.first_name}</b> passe son tour.",
-            reply_markup=_game_keyboard(chat_id),
+            reply_markup=_game_keyboard(chat_id, game),
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif data.startswith("suffer_"):
+        chat_id = int(data.removeprefix("suffer_"))
+        game = gm.get_game(chat_id)
+        if not game or not game.started:
+            return
+        if user.id != game.current_player().user_id:
+            await query.answer("Ce n'est pas ton tour !", show_alert=True)
+            return
+        count = game.suffer_attack(user.id)
+        await query.edit_message_text(
+            _status_text(game) + f"\n\n💀 <b>{user.first_name}</b> subit l'attaque et pioche <b>{count} cartes</b> !",
+            reply_markup=_game_keyboard(chat_id, game),
             parse_mode=ParseMode.HTML,
         )
 
@@ -323,7 +355,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         game.set_top_suit(suit)
         await query.edit_message_text(
             _status_text(game),
-            reply_markup=_game_keyboard(chat_id),
+            reply_markup=_game_keyboard(chat_id, game),
             parse_mode=ParseMode.HTML,
         )
 
@@ -375,21 +407,53 @@ async def on_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    # Cartes affichées en liste horizontale (Article = 1 ligne compacte)
-    # Titre court = ce qui s'affiche sur la vignette inline
+    # On attend un choix de couleur → plus personne ne peut jouer, on l'affiche
+    if game.waiting_suit:
+        chooser = game.get_player(game.pending_suit_chooser)
+        chooser_name = chooser.name if chooser else "?"
+        await query.answer(
+            [InlineQueryResultArticle(
+                id="waiting_suit",
+                title=f"⏳ En attente du choix de couleur de {chooser_name}…",
+                description="Impossible de jouer pour l'instant",
+                input_message_content=InputTextMessageContent(
+                    f"⏳ En attente du choix de couleur de <b>{chooser_name}</b>…",
+                    parse_mode=ParseMode.HTML,
+                ),
+            )],
+            cache_time=0,
+        )
+        return
+
+    # Pas ton tour → affiche le statut du jeu (visible seulement par toi, pas dans le groupe)
+    is_my_turn = game.current_player().user_id == query.from_user.id
+    if not is_my_turn:
+        current_name = game.current_player().name
+        await query.answer(
+            [InlineQueryResultArticle(
+                id="not_turn",
+                title=f"⏳ C'est le tour de {current_name}",
+                description=f"Tu as {len(player.hand)} carte(s) en main. Patiente !",
+                input_message_content=InputTextMessageContent(
+                    _status_text(game), parse_mode=ParseMode.HTML
+                ),
+            )],
+            cache_time=0,
+        )
+        return
+
     results = []
     for card in player.hand:
         playable  = game.can_play(card, player.user_id)
         result_id = f"{chat_id}_{card.to_id()}"
+        label = _card_label(card)
 
-        # Affichage compact : "A ♠️"  "7 ♥️"  "J ♦️" etc.
-        v = {"J": "J", "Q": "Q", "K": "K", "A": "A", "JOKER": "🃏"}.get(card.value, card.value)
-        e = card.suit_emoji()
-        label = f"{v}{e}"
-
-        if playable:
+        if game.under_attack and not game.can_play(card, player.user_id):
+            title = f"🚫 {label}"
+            desc  = "Ne peut pas counter"
+        elif playable:
             title = f"✅ {label}"
-            desc  = "Jouer"
+            desc  = "Counter !" if game.under_attack else "Jouer"
         else:
             title = f"🚫 {label}"
             desc  = "Non jouable"
@@ -399,7 +463,7 @@ async def on_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             title=title,
             description=desc,
             input_message_content=InputTextMessageContent(
-                f"🃏 <b>{query.from_user.first_name}</b> joue <b>{v} {e}</b>",
+                f"🃏 <b>{query.from_user.first_name}</b> joue <b>{label}</b>",
                 parse_mode=ParseMode.HTML,
             ),
             reply_markup=InlineKeyboardMarkup([[
@@ -407,16 +471,17 @@ async def on_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             ]]) if playable else None,
         ))
 
-    # Piocher
-    results.append(InlineQueryResultArticle(
-        id=f"{chat_id}_draw",
-        title="📥 Piocher",
-        description="Tirer une carte de la pioche",
-        input_message_content=InputTextMessageContent(
-            f"📥 <b>{query.from_user.first_name}</b> pioche une carte.",
-            parse_mode=ParseMode.HTML,
-        ),
-    ))
+    # Piocher — masqué si sous attaque (doit utiliser le bouton "Subir" dans le groupe)
+    if not game.under_attack:
+        results.append(InlineQueryResultArticle(
+            id=f"{chat_id}_draw",
+            title="📥 Piocher",
+            description="Tirer une carte de la pioche",
+            input_message_content=InputTextMessageContent(
+                f"📥 <b>{query.from_user.first_name}</b> pioche une carte.",
+                parse_mode=ParseMode.HTML,
+            ),
+        ))
 
     await query.answer(results, cache_time=0)
 
@@ -440,7 +505,7 @@ async def _send_game_state(bot, chat_id: int, game: Game, effect_msg: str = "") 
         text += f"\n\n{effect_msg}"
     await bot.send_message(
         chat_id, text,
-        reply_markup=_game_keyboard(chat_id),
+        reply_markup=_game_keyboard(chat_id, game),
         parse_mode=ParseMode.HTML,
     )
 
@@ -486,7 +551,13 @@ async def on_chosen_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     if not game or not game.started:
         return
 
-    # ── Pas le bon joueur : message sans révéler la carte ──
+    # ── Guard : choix de couleur en attente → bloquer ──
+    if game.waiting_suit:
+        # Quelqu'un a joué J ou Joker, on attend le choix de couleur
+        # Rien d'autre ne peut être joué
+        return
+
+    # ── Pas le bon joueur ──
     if user.id != game.current_player().user_id:
         await ctx.bot.send_message(
             chat_id,
@@ -505,9 +576,10 @@ async def on_chosen_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         v = {"J": "J", "Q": "Q", "K": "K", "A": "A", "JOKER": "🃏"}.get(card.value, card.value)
         e = card.suit_emoji()
         if game.can_play(card, user.id):
+            # Carte jouable : ne révèle pas la carte dans le groupe
             await ctx.bot.send_message(
                 chat_id,
-                _status_text(game) + f"\n\n📥 <b>{user.first_name}</b> pioche <b>{v} {e}</b> — jouable !",
+                _status_text(game) + f"\n\n📥 <b>{user.first_name}</b> pioche une carte — elle est jouable !",
                 reply_markup=_draw_or_pass_keyboard(chat_id),
                 parse_mode=ParseMode.HTML,
             )
@@ -516,7 +588,7 @@ async def on_chosen_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
             await ctx.bot.send_message(
                 chat_id,
                 _status_text(game) + f"\n\n📥 <b>{user.first_name}</b> pioche et passe son tour.",
-                reply_markup=_game_keyboard(chat_id),
+                reply_markup=_game_keyboard(chat_id, game),
                 parse_mode=ParseMode.HTML,
             )
         return
@@ -550,11 +622,14 @@ async def on_chosen_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     # Choix de couleur requis (J ou Joker) ?
-    if game.pending_suit_chooser:
+    if game.waiting_suit:
         await _send_card_played(ctx.bot, chat_id, user.first_name, card)
+        extra = ""
+        if game.under_attack:
+            extra = f"\n⚔️ Pile d'attaque : <b>{game.attack_stack}</b> carte(s) en jeu."
         await ctx.bot.send_message(
             chat_id,
-            f"🎨 <b>{user.first_name}</b>, choisis la couleur :",
+            f"🎨 <b>{user.first_name}</b>, choisis la couleur :{extra}",
             reply_markup=_suit_keyboard(chat_id),
             parse_mode=ParseMode.HTML,
         )
