@@ -73,7 +73,13 @@ def build_deck() -> list[Card]:
 class Player:
     user_id: int
     name: str
+    username: Optional[str] = None
     hand: list[Card] = field(default_factory=list)
+
+    def mention(self) -> str:
+        if self.username:
+            return f"@{self.username}"
+        return self.name
 
     def remove_card(self, card: Card):
         self.hand.remove(card)
@@ -104,10 +110,10 @@ class Game:
 
     # ── Setup ──────────────────────────────────────────────
 
-    def add_player(self, user_id: int, name: str) -> bool:
+    def add_player(self, user_id: int, name: str, username: Optional[str] = None) -> bool:
         if any(p.user_id == user_id for p in self.players):
             return False
-        self.players.append(Player(user_id=user_id, name=name))
+        self.players.append(Player(user_id=user_id, name=name, username=username))
         return True
 
     def get_player(self, user_id: int) -> Optional[Player]:

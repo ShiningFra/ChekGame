@@ -89,7 +89,7 @@ def _status_text(game: Game) -> str:
         lines.append(f"{arrow} {p.name} — {len(p.hand)} carte(s){check}")
     lines += [
         "",
-        f"C'est au tour de <b>{current.name}</b> !",
+        f"C'est au tour de <b>{current.name}</b> — {current.mention()} à toi !",
         "Utilise le bouton ci-dessous pour jouer.",
     ]
     return "\n".join(lines)
@@ -250,7 +250,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if game.started:
             await query.answer("La partie a déjà commencé !", show_alert=True)
             return
-        if not game.add_player(user.id, user.first_name):
+        if not game.add_player(user.id, user.first_name, user.username):
             await query.answer("Tu es déjà inscrit !", show_alert=True)
             return
         names = ", ".join(p.name for p in game.players)
